@@ -105,23 +105,37 @@ def ddos_request(url):
     except exceptions.RequestException:
         return False
 
-def check_ddos(target_url):
-    num_requests = 5000
+def check_ddos(target_url, num_requests=5000, max_workers=300):
     failed_requests = 0
-    
-    with ThreadPoolExecutor(max_workers=800) as executor:
-        results = list(executor.map(ddos_request, [target_url] * num_requests))
-    
-    failed_requests = results.count(False)
-    
+    successful_requests = 0
+    start_time = time.time()
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_url = {executor.submit(ddos_request, target_url): _ for _ in range(num_requests)}
+        for future in as_completed(future_to_url):
+            if future.result():
+                successful_requests += 1
+            else:
+                failed_requests += 1
+
+    duration = time.time() - start_time
+    print(f"Prueba DDoS completada en {duration:.2f} segundos")
+
     if failed_requests > (num_requests / 2):  # Si más del 50% de las solicitudes fallaron
         details = {
             "num_requests": num_requests,
-            "failed_requests": failed_requests
+            "failed_requests": failed_requests,
+            "successful_requests": successful_requests,
+            "duration": duration
         }
         return ("El sitio puede ser vulnerable a ataques DDoS.", details)
     else:
-        return "El sitio parece ser resistente a ataques DDoS.", None
+        details = {
+            "num_requests": num_requests,
+            "successful_requests": successful_requests,
+            "duration": duration
+        }
+        return "El sitio parece ser resistente a ataques DDoS.", details
 
 
 def load_xss_payloads(file_path):
@@ -129,15 +143,19 @@ def load_xss_payloads(file_path):
         data = json.load(file)
     return [item['payload'] for item in data if 'payload' in item]
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
+import time
+
 def test_payload(target_url, payload, browser_info, counter):
     try:
         full_url = f"{target_url}{payload}"
         response = requests.get(full_url)
         if payload in response.text:
-            return payload, browser_info, True
+            return payload, True
     except Exception as e:
         print(f"Error al probar el payload #{counter}: {e}")
-    return payload, browser_info, False
+    return payload, False
 
 def check_xss(target_url):
     vulnerable_payloads = []
@@ -145,12 +163,13 @@ def check_xss(target_url):
     with ThreadPoolExecutor(max_workers=50) as executor:
         future_to_payload = {executor.submit(test_payload, target_url, vector['payload'], vector.get('browser', 'Desconocido'), counter): vector for counter, vector in enumerate(vectors, start=1)}
         for future in as_completed(future_to_payload):
-            payload, browser_info, is_vulnerable = future.result()
+            payload, is_vulnerable = future.result()
             if is_vulnerable:
-                print(f"Payload vulnerable detectado: {payload} (Navegador: {browser_info})")
-                vulnerable_payloads.append((payload, browser_info))
+                print(f"Payload vulnerable detectado: {payload}")
+                vulnerable_payloads.append(payload)
 
     return "Vulnerabilidad XSS detectada" if vulnerable_payloads else "No se detectaron vulnerabilidades XSS", vulnerable_payloads
+
 
 def scan_port(target_ip, port, open_ports, interesting_ports, timeout):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -246,7 +265,7 @@ def check_cookie_security(target_url):
         # Verificar la duración de la cookie
         if "max-age" in cookie or "expires" in cookie:
             if "max-age=0" in cookie or "expires=Thu, 01 Jan 1970 00:00:00 GMT" in cookie:
-                cookies_issues.append(f"La cookie '{cookie_name}' tiene una duración demasiado corta.")
+                cookies_issues.append(f"La cookie '{cookie_name}' tiene una duracion demasiado corta.")
         
         # Detectar cookies potencialmente predecibles
         predictable_patterns = [r"\d{4,}", r"cookie\d+", r"user\d+", r"session\d+"]
@@ -262,8 +281,8 @@ def check_cookie_security(target_url):
 
     # Verificar política de cookies en la página
     soup = bs(response.text, "html.parser")
-    if not soup.find(string=re.compile("política de cookies", re.IGNORECASE)):
-        cookies_issues.append("No se encontró una mención explícita sobre la política de cookies en la página.")
+    if not soup.find(string=re.compile("politica de cookies", re.IGNORECASE)):
+        cookies_issues.append("No se encontro una mencion explicita sobre la politica de cookies en la pagina.")
 
     if cookies_issues:
         report += "\n".join(cookies_issues)
@@ -277,8 +296,8 @@ def save_to_database(vulnerability_type, target_url, details, payloads=None):
     filename = f"bbdd_{vulnerability_type.lower()}.txt"
     entry = f"------------\n"
     entry += f"URL: {target_url}\n"
-    entry += f"Tipo_De_Vulnerabilidad: {vulnerability_type}\n"
-    entry += f"Fecha_Detectada: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    entry += f"Tipo De Vulnerabilidad: {vulnerability_type}\n"
+    entry += f"Fecha Detectada: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     entry += f"Detalles: {details}\n"
 
     if payloads:
@@ -336,7 +355,7 @@ def main():
     if xss_result == "Vulnerabilidad XSS detectada":
         save_to_database("XSS", target_url, xss_result, xss_payloads)
     else:
-        print("No se han encontrado vulnerabilidades\n")
+        print("No se han encontrado vulnerabilidades")
       
     # SQLi
     print("\n[+] Comprobando SQL Injection...")
@@ -352,12 +371,14 @@ def main():
     if ddos_permission.lower() == 's':
         print("\n[+] Comprobando resistencia a DDoS...")
         ddos_result, ddos_details = check_ddos(target_url)
-        if ddos_result:  # Asegúrate de que ddos_result no es None antes de imprimir o guardar
+        if ddos_result: 
             print(ddos_result)
             if "vulnerable" in ddos_result.lower():
+                print(f"Detalles de la prueba DDoS: {ddos_details}")
                 save_to_database("DDoS", target_url, ddos_details)
         else:
             print("No se pudo realizar la comprobación de DDoS o no se encontraron vulnerabilidades.")
+
             
     # Compilando el informe
     report = "\n----- INFORME FINAL -----\n"
